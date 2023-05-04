@@ -90,7 +90,9 @@ pub fn evm_spec(evm: &EvmVersion) -> SpecId {
         EvmVersion::Istanbul => SpecId::ISTANBUL,
         EvmVersion::Berlin => SpecId::BERLIN,
         EvmVersion::London => SpecId::LONDON,
-        _ => panic!("Unsupported EVM version"),
+        // FIXME: This is a temporary patch.
+        _ => SpecId::LONDON,
+        // _ => panic!("Unsupported EVM version"),
     }
 }
 
