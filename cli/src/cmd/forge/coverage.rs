@@ -62,16 +62,14 @@ impl CoverageArgs {
     }
 }
 
-impl Cmd for CoverageArgs {
-    type Output = ();
-
-    fn run(self) -> eyre::Result<Self::Output> {
+impl CoverageArgs {
+    pub async fn run(self) -> eyre::Result<()> {
         let (mut config, evm_opts) = self.load_config_and_evm_opts_emit_warnings()?;
         let project = config.project()?;
 
         // install missing dependencies
-        if install::install_missing_dependencies(&mut config, &project, self.build_args().silent) &&
-            config.auto_detect_remappings
+        if install::install_missing_dependencies(&mut config, &project, self.build_args().silent)
+            && config.auto_detect_remappings
         {
             // need to re-configure here to also catch additional remappings
             config = self.load_config();
@@ -85,7 +83,7 @@ impl Cmd for CoverageArgs {
         let report = self.prepare(&config, output.clone())?;
 
         p_println!(!self.opts.silent => "Running tests...");
-        self.collect(project, output, report, config, evm_opts)
+        self.collect(project, output, report, config, evm_opts).await
     }
 }
 
@@ -135,7 +133,7 @@ impl CoverageArgs {
         for (path, mut source_file, version) in sources.into_sources_with_version() {
             // Filter out dependencies
             if project_paths.has_library_ancestor(std::path::Path::new(&path)) {
-                continue
+                continue;
             }
 
             if let Some(ast) = source_file.ast.take() {
@@ -255,7 +253,7 @@ impl CoverageArgs {
     }
 
     /// Runs tests, collects coverage data and generates the final report.
-    fn collect(
+    async fn collect(
         self,
         project: Project,
         output: ProjectCompileOutput,
@@ -281,8 +279,9 @@ impl CoverageArgs {
         // Run tests
         let known_contracts = runner.known_contracts.clone();
         let (tx, rx) = channel::<(String, SuiteResult)>();
+        let config_clone = config.clone();
         let handle =
-            thread::spawn(move || runner.test(&self.filter, Some(tx), Default::default()).unwrap());
+            tokio::spawn(async move { runner.test(config_clone, &self.filter, Some(tx), Default::default()).await.unwrap() });
 
         // Add hit data to the coverage report
         for (artifact_id, hits) in rx
@@ -314,7 +313,7 @@ impl CoverageArgs {
         }
 
         // Reattach the thread
-        let _ = handle.join();
+        let _ = handle.await;
 
         // Output final report
         for report_kind in self.report {

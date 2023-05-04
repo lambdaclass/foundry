@@ -15,7 +15,6 @@ use foundry_evm::{
     revm,
 };
 use foundry_utils::PostLinkInput;
-use rayon::prelude::*;
 use revm::primitives::SpecId;
 use std::{collections::BTreeMap, path::Path, sync::mpsc::Sender};
 
@@ -115,8 +114,9 @@ impl MultiContractRunner {
     /// before executing all contracts and their tests in _parallel_.
     ///
     /// Each Executor gets its own instance of the `Backend`.
-    pub fn test(
+    pub async fn test(
         &mut self,
+        config: foundry_config::Config,
         filter: &impl TestFilter,
         stream_result: Option<Sender<(String, SuiteResult)>>,
         test_options: TestOptions,
@@ -126,47 +126,50 @@ impl MultiContractRunner {
         // the db backend that serves all the data, each contract gets its own instance
         let db = Backend::spawn(self.fork.take());
 
-        let results = self
-            .contracts
-            .par_iter()
-            .filter(|(id, _)| {
-                filter.matches_path(id.source.to_string_lossy()) &&
-                    filter.matches_contract(&id.name)
-            })
-            .filter(|(_, (abi, _, _))| abi.functions().any(|func| filter.matches_test(&func.name)))
-            .map(|(id, (abi, deploy_code, libs))| {
-                let executor = ExecutorBuilder::default()
-                    .with_cheatcodes(self.cheats_config.clone())
-                    .with_config(self.env.clone())
-                    .with_spec(self.evm_spec)
-                    .with_gas_limit(self.evm_opts.gas_limit())
-                    .set_tracing(self.evm_opts.verbosity >= 3)
-                    .set_coverage(self.coverage)
-                    .build(db.clone());
-                let identifier = id.identifier();
-                tracing::trace!(contract= ?identifier, "start executing all tests in contract");
+        let mut results = BTreeMap::new();
+        for (id, (abi, deploy_code, libs)) in &self.contracts {
+            if !(filter.matches_path(id.source.to_string_lossy())
+                && filter.matches_contract(&id.name)
+                && abi.functions().any(|func| filter.matches_test(&func.name)))
+            {
+                continue;
+            }
 
-                let result = self.run_tests(
+            let executor = ExecutorBuilder::default()
+                .with_cheatcodes(self.cheats_config.clone())
+                .with_config(self.env.clone())
+                .with_spec(self.evm_spec)
+                .with_gas_limit(self.evm_opts.gas_limit())
+                .set_tracing(self.evm_opts.verbosity >= 3)
+                .set_coverage(self.coverage)
+                .build(db.clone());
+            let identifier = id.identifier();
+            tracing::trace!(contract= ?identifier, "start executing all tests in contract");
+
+            let result = self
+                .run_tests(
+                    &config,
                     &identifier,
                     abi,
                     executor,
                     deploy_code.clone(),
                     libs,
                     (filter, test_options),
-                )?;
+                )
+                .await?;
 
-                tracing::trace!(contract= ?identifier, "executed all tests in contract");
-                Ok((identifier, result))
-            })
-            .filter_map(Result::<_>::ok)
-            .filter(|(_, results)| !results.is_empty())
-            .map_with(stream_result, |stream_result, (name, result)| {
-                if let Some(stream_result) = stream_result.as_ref() {
-                    let _ = stream_result.send((name.clone(), result.clone()));
-                }
-                (name, result)
-            })
-            .collect::<BTreeMap<_, _>>();
+            tracing::trace!(contract= ?identifier, "executed all tests in contract");
+
+            if result.is_empty() {
+                continue;
+            }
+
+            if let Some(stream_result) = stream_result.as_ref() {
+                let _ = stream_result.send((identifier.clone(), result.clone())).unwrap();
+            }
+
+            results.insert(identifier, result);
+        }
 
         Ok(results)
     }
@@ -178,8 +181,9 @@ impl MultiContractRunner {
         err,
         fields(name = %_name)
     )]
-    fn run_tests(
+    async fn run_tests(
         &self,
+        config: &foundry_config::Config,
         _name: &str,
         contract: &Abi,
         executor: Executor,
@@ -196,7 +200,7 @@ impl MultiContractRunner {
             self.errors.as_ref(),
             libs,
         );
-        runner.run_tests(filter, test_options, Some(&self.known_contracts))
+        runner.run_tests(config, filter, test_options, Some(&self.known_contracts)).await
     }
 }
 

@@ -188,8 +188,9 @@ impl<'a> ContractRunner<'a> {
     }
 
     /// Runs all tests for a contract whose names match the provided regular expression
-    pub fn run_tests(
+    pub async fn run_tests(
         mut self,
+        config: &foundry_config::Config,
         filter: &impl TestFilter,
         test_options: TestOptions,
         known_contracts: Option<&ContractsByArtifact>,
@@ -283,25 +284,22 @@ impl<'a> ContractRunner<'a> {
 
         let mut test_results = BTreeMap::new();
         if !tests.is_empty() {
-            test_results.extend(
-                tests
-                    .par_iter()
-                    .flat_map(|(func, should_fail)| {
-                        if func.is_fuzz_test() {
-                            self.run_fuzz_test(
-                                func,
-                                *should_fail,
-                                test_options.fuzzer(),
-                                setup.clone(),
-                                test_options.fuzz,
-                            )
-                        } else {
-                            self.clone().run_test(func, *should_fail, setup.clone())
-                        }
-                        .map(|result| Ok((func.signature(), result)))
-                    })
-                    .collect::<Result<BTreeMap<_, _>>>()?,
-            );
+            for (func, should_fail) in tests {
+                let test_result = if func.is_fuzz_test() {
+                    self.run_fuzz_test(
+                        func,
+                        should_fail,
+                        test_options.fuzzer(),
+                        setup.clone(),
+                        test_options.fuzz,
+                    )
+                } else {
+                    self.clone().run_test(config.clone(), func, should_fail, setup.clone()).await
+                }
+                .map(|result| Ok::<_, eyre::Error>((func.signature(), result)))??;
+
+                test_results.insert(test_result.0, test_result.1);
+            }
         }
 
         if has_invariants {
@@ -353,14 +351,36 @@ impl<'a> ContractRunner<'a> {
     ///
     /// State modifications are not committed to the evm database but discarded after the call,
     /// similar to `eth_call`.
-    #[tracing::instrument(name = "test", skip_all, fields(name = %func.signature(), %should_fail))]
-    pub fn run_test(
+    pub async fn run_test(
         mut self,
+        config: foundry_config::Config,
         func: &Function,
         should_fail: bool,
         setup: TestSetup,
     ) -> Result<TestResult> {
         let TestSetup { address, mut logs, mut traces, mut labeled_addresses, .. } = setup;
+
+        let url = config.get_rpc_url_or_localhost_http()?;
+        let chain = config.chain_id.unwrap_or_default();
+        let provider = foundry_common::ProviderBuilder::new(url.as_ref()).chain(chain).build()?;
+        let chain = match config.chain_id {
+            Some(chain) => chain,
+            None => foundry_config::Chain::Id(ethers::providers::Middleware::get_chainid(&provider).await?.as_u64()),
+        };
+
+        let mut builder =
+            cast::TxBuilder::new(&provider, self.sender, Some(address), chain, false).await?;
+        builder
+            .gas(None)
+            .etherscan_api_key(config.get_etherscan_api_key(Some(chain)))
+            .gas_price(None)
+            .priority_gas_price(None)
+            .value(None)
+            .set_data(Bytes::from(ethers::prelude::encode_function_data(func, ())?.to_vec()).to_vec())
+            .nonce(None);
+        let builder_output = builder.build();
+        println!("{:#?}", builder_output.0);
+        println!("CAST OUTPUT: {}", cast::Cast::new(provider).call(builder_output, None).await?);
 
         // Run unit test
         let start = Instant::now();

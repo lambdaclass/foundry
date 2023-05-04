@@ -109,14 +109,12 @@ impl SnapshotArgs {
     }
 }
 
-impl Cmd for SnapshotArgs {
-    type Output = ();
-
-    fn run(mut self) -> eyre::Result<()> {
+impl SnapshotArgs {
+    pub async fn run(mut self) -> eyre::Result<()> {
         // Set fuzz seed so gas snapshots are deterministic
         self.test.fuzz_seed = Some(U256::from_big_endian(&STATIC_FUZZ_SEED));
 
-        let outcome = self.test.execute_tests()?;
+        let outcome = self.test.execute_tests().await?;
         outcome.ensure_ok()?;
         let tests = self.config.apply(outcome);
 
@@ -180,12 +178,12 @@ impl SnapshotConfig {
     fn is_in_gas_range(&self, gas_used: u64) -> bool {
         if let Some(min) = self.min {
             if gas_used < min {
-                return false
+                return false;
             }
         }
         if let Some(max) = self.max {
             if gas_used > max {
-                return false
+                return false;
             }
         }
         true

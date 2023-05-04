@@ -10,7 +10,8 @@ use foundry_cli::{
     utils,
 };
 
-fn main() -> eyre::Result<()> {
+#[tokio::main]
+async fn main() -> eyre::Result<()> {
     utils::load_dotenv();
     handler::install()?;
     utils::subscriber();
@@ -22,7 +23,7 @@ fn main() -> eyre::Result<()> {
             if cmd.is_watch() {
                 utils::block_on(watch::watch_test(cmd))
             } else {
-                let outcome = cmd.run()?;
+                let outcome = cmd.run().await?;
                 outcome.ensure_ok()
             }
         }
@@ -34,7 +35,7 @@ fn main() -> eyre::Result<()> {
             ))?;
             utils::block_on(cmd.run_script(Default::default()))
         }
-        Subcommands::Coverage(cmd) => cmd.run(),
+        Subcommands::Coverage(cmd) => cmd.run().await,
         Subcommands::Bind(cmd) => cmd.run(),
         Subcommands::Build(cmd) => {
             if cmd.is_watch() {
@@ -78,7 +79,7 @@ fn main() -> eyre::Result<()> {
             if cmd.is_watch() {
                 utils::block_on(watch::watch_snapshot(cmd))
             } else {
-                cmd.run()
+                cmd.run().await
             }
         }
         Subcommands::Fmt(cmd) => cmd.run(),

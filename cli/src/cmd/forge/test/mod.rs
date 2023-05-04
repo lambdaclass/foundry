@@ -118,7 +118,7 @@ impl TestArgs {
     /// configured filter will be executed
     ///
     /// Returns the test results for all matching tests.
-    pub fn execute_tests(self) -> eyre::Result<TestOutcome> {
+    pub async fn execute_tests(self) -> eyre::Result<TestOutcome> {
         // Merge all configs
         let (mut config, mut evm_opts) = self.load_config_and_evm_opts_emit_warnings()?;
 
@@ -175,7 +175,7 @@ impl TestArgs {
             match runner.count_filtered_tests(&filter) {
                 1 => {
                     // Run the test
-                    let results = runner.test(&filter, None, test_options)?;
+                    let results = runner.test(config, &filter, None, test_options).await?;
 
                     // Get the result of the single test
                     let (id, sig, test_kind, counterexample, breakpoints) = results.iter().map(|(id, SuiteResult{ test_results, .. })| {
@@ -231,7 +231,7 @@ impl TestArgs {
                 test_options,
                 self.gas_report,
                 self.fail_fast,
-            )
+            ).await
         }
     }
 
@@ -277,13 +277,11 @@ impl Provider for TestArgs {
     }
 }
 
-impl Cmd for TestArgs {
-    type Output = TestOutcome;
-
-    fn run(self) -> eyre::Result<Self::Output> {
+impl TestArgs {
+    pub async fn run(self) -> eyre::Result<TestOutcome> {
         trace!(target: "forge::test", "executing test command");
         shell::set_shell(shell::Shell::from_args(self.opts.silent, self.json))?;
-        self.execute_tests()
+        self.execute_tests().await
     }
 }
 
@@ -357,7 +355,7 @@ impl TestOutcome {
     pub fn ensure_ok(&self) -> eyre::Result<()> {
         let failures = self.failures().count();
         if self.allow_failure || failures == 0 {
-            return Ok(())
+            return Ok(());
         }
 
         if !shell::verbosity().is_normal() {
@@ -370,7 +368,7 @@ impl TestOutcome {
         for (suite_name, suite) in self.results.iter() {
             let failures = suite.failures().count();
             if failures == 0 {
-                continue
+                continue;
             }
 
             let term = if failures > 1 { "tests" } else { "test" };
@@ -465,7 +463,7 @@ fn list(
 
 /// Runs all the tests
 #[allow(clippy::too_many_arguments)]
-fn test(
+async fn test(
     config: Config,
     mut runner: MultiContractRunner,
     verbosity: u8,
@@ -498,7 +496,7 @@ fn test(
     }
 
     if json {
-        let results = runner.test(&filter, None, test_options)?;
+        let results = runner.test(config, &filter, None, test_options).await?;
         println!("{}", serde_json::to_string(&results)?);
         Ok(TestOutcome::new(results, allow_failure))
     } else {
@@ -512,7 +510,9 @@ fn test(
         let (tx, rx) = channel::<(String, SuiteResult)>();
 
         // Run tests
-        let handle = thread::spawn(move || runner.test(&filter, Some(tx), test_options).unwrap());
+        let config_clone = config.clone();
+        let _ =
+            tokio::spawn(async move { runner.test(config_clone, &filter, Some(tx), test_options).await.unwrap() }).await;
 
         let mut results: BTreeMap<String, SuiteResult> = BTreeMap::new();
         let mut gas_report = GasReport::new(config.gas_reports, config.gas_reports_ignore);
@@ -616,9 +616,6 @@ fn test(
         if gas_reporting {
             println!("{}", gas_report.finalize());
         }
-
-        // reattach the thread
-        let _ = handle.join();
 
         trace!(target: "forge::test", "received {} results", results.len());
         Ok(TestOutcome::new(results, allow_failure))

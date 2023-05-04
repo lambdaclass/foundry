@@ -10,6 +10,8 @@ foundry-common = { path = "./../common" }
 foundry-config = { path = "./../config" }
 foundry-evm = { path = "./../evm" }
 
+cast = { path = "../cast" }
+
 ethers = { workspace = true, features = ["solc-full"] }
 eyre = "0.6.8"
 semver = "1.0.17"
